@@ -102,7 +102,13 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "outfit_suggestion": None,   # string returned by suggest_outfit
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
+        "trace": [],                 # human-readable log of each planning step
     }
+
+
+def _log(session: dict, line: str) -> None:
+    """Append a line to the session trace (used to make state flow visible)."""
+    session["trace"].append(line)
 
 
 # ── planning loop ─────────────────────────────────────────────────────────────
@@ -154,12 +160,27 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     """
     # Step 1: Initialize the session.
     session = _new_session(query, wardrobe)
+    n_wardrobe = len(session["wardrobe"].get("items", []))
+    _log(session, f'STEP 1 · Parse query\n  input : user query = "{query}"')
 
     # Step 2: Parse the query into description / size / max_price.
     session["parsed"] = _parse_query(query)
     parsed = session["parsed"]
+    _log(
+        session,
+        "  tool  : _parse_query(query)\n"
+        f"  WRITE state['parsed'] = description='{parsed['description']}', "
+        f"size={parsed['size']!r}, max_price={parsed['max_price']!r}",
+    )
 
     # Step 3: Search listings with the parsed parameters.
+    _log(
+        session,
+        "\nSTEP 2 · Search listings\n"
+        "  READ  state['parsed']  (from Step 1)\n"
+        f"  tool  : search_listings(description='{parsed['description']}', "
+        f"size={parsed['size']!r}, max_price={parsed['max_price']!r})",
+    )
     session["search_results"] = search_listings(
         description=parsed["description"],
         size=parsed["size"],
@@ -176,20 +197,53 @@ def run_agent(query: str, wardrobe: dict) -> dict:
             f"{price_txt}. Try broadening your search — remove the size filter, "
             f"increase your budget, or use more general keywords."
         )
+        _log(
+            session,
+            "  WRITE state['search_results'] = []  (0 matches)\n"
+            "  BRANCH: empty results → set state['error'] and RETURN early.\n"
+            "          suggest_outfit / create_fit_card are NOT called.",
+        )
         return session
+
+    _log(
+        session,
+        f"  WRITE state['search_results'] = {len(session['search_results'])} matches",
+    )
 
     # Step 4: Select the top-scored result.
     session["selected_item"] = session["search_results"][0]
+    item = session["selected_item"]
+    _log(
+        session,
+        "\nSTEP 3 · Select top result\n"
+        f"  WRITE state['selected_item'] = '{item['title']}' "
+        f"(${item['price']}, {item['platform']})",
+    )
 
     # Step 5: Suggest an outfit using the selected item and the wardrobe.
+    _log(
+        session,
+        "\nSTEP 4 · Suggest outfit\n"
+        "  READ  state['selected_item']  (the SAME item from Step 3 — no re-entry)\n"
+        f"  tool  : suggest_outfit(new_item='{item['title']}', "
+        f"wardrobe={n_wardrobe} items)",
+    )
     session["outfit_suggestion"] = suggest_outfit(
         session["selected_item"], session["wardrobe"]
     )
+    _log(session, "  WRITE state['outfit_suggestion'] = <outfit text>")
 
     # Step 6: Generate the shareable fit card from the outfit + selected item.
+    _log(
+        session,
+        "\nSTEP 5 · Create fit card\n"
+        "  READ  state['outfit_suggestion'] (Step 4) + state['selected_item'] (Step 3)\n"
+        f"  tool  : create_fit_card(outfit=<Step 4 text>, new_item='{item['title']}')",
+    )
     session["fit_card"] = create_fit_card(
         session["outfit_suggestion"], session["selected_item"]
     )
+    _log(session, "  WRITE state['fit_card'] = <caption>")
 
     # Step 7: Return the completed session (error stays None on success).
     return session
@@ -205,6 +259,8 @@ if __name__ == "__main__":
         query="looking for a vintage graphic tee under $30",
         wardrobe=get_example_wardrobe(),
     )
+    print("\n".join(session["trace"]))          # visible state flow, step by step
+    print("\n" + "-" * 60)
     if session["error"]:
         print(f"Error: {session['error']}")
     else:
@@ -217,4 +273,6 @@ if __name__ == "__main__":
         query="designer ballgown size XXS under $5",
         wardrobe=get_example_wardrobe(),
     )
+    print("\n".join(session2["trace"]))          # shows the early-exit branch
+    print("\n" + "-" * 60)
     print(f"Error message: {session2['error']}")

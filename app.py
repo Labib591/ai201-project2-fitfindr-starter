@@ -20,7 +20,7 @@ from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
 
 # ── query handler ─────────────────────────────────────────────────────────────
 
-def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
+def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str, str]:
     """
     Called by Gradio when the user submits a query.
 
@@ -29,9 +29,10 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
         wardrobe_choice: Either "Example wardrobe" or "Empty wardrobe (new user)".
 
     Returns:
-        A tuple of three strings:
-            (listing_text, outfit_suggestion, fit_card)
-        Each string maps to one of the three output panels in the UI.
+        A tuple of four strings:
+            (listing_text, outfit_suggestion, fit_card, agent_trace)
+        The first three map to the result panels; agent_trace is the step-by-step
+        planning log that shows which tool ran and how state flowed between them.
 
     TODO:
         1. Guard against an empty query (return early with an error message).
@@ -45,7 +46,7 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
     """
     # 1. Guard against an empty query.
     if not user_query or not user_query.strip():
-        return "Please enter what you're looking for.", "", ""
+        return "Please enter what you're looking for.", "", "", ""
 
     # 2. Select the wardrobe based on the radio choice.
     if wardrobe_choice == "Empty wardrobe (new user)":
@@ -55,10 +56,12 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
 
     # 3. Run the planning loop.
     session = run_agent(user_query, wardrobe)
+    trace = "\n".join(session["trace"])
 
-    # 4. Early-exit / error path: show the message, leave the other panels empty.
+    # 4. Early-exit / error path: show the message, leave the result panels empty.
+    #    The trace still renders so the early-exit branch is visible.
     if session["error"]:
-        return session["error"], "", ""
+        return session["error"], "", "", trace
 
     # 5. Success path: format the selected listing for display.
     item = session["selected_item"]
@@ -70,7 +73,7 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
         f"{item['description']}"
     )
 
-    return listing_text, session["outfit_suggestion"], session["fit_card"]
+    return listing_text, session["outfit_suggestion"], session["fit_card"], trace
 
 
 # ── interface ─────────────────────────────────────────────────────────────────
@@ -124,6 +127,12 @@ Describe what you're looking for — include size and price if you want to filte
                 interactive=False,
             )
 
+        trace_output = gr.Textbox(
+            label="🧠 Agent trace — which tool ran at each step and how state flowed",
+            lines=14,
+            interactive=False,
+        )
+
         gr.Examples(
             examples=[[q, "Example wardrobe"] for q in EXAMPLE_QUERIES],
             inputs=[query_input, wardrobe_choice],
@@ -133,12 +142,12 @@ Describe what you're looking for — include size and price if you want to filte
         submit_btn.click(
             fn=handle_query,
             inputs=[query_input, wardrobe_choice],
-            outputs=[listing_output, outfit_output, fitcard_output],
+            outputs=[listing_output, outfit_output, fitcard_output, trace_output],
         )
         query_input.submit(
             fn=handle_query,
             inputs=[query_input, wardrobe_choice],
-            outputs=[listing_output, outfit_output, fitcard_output],
+            outputs=[listing_output, outfit_output, fitcard_output, trace_output],
         )
 
     return demo
