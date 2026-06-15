@@ -18,7 +18,67 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
-from tools import search_listings, suggest_outfit, create_fit_card
+import json
+import re
+
+from tools import search_listings, suggest_outfit, create_fit_card, _get_groq_client
+
+
+# ── query parsing ─────────────────────────────────────────────────────────────
+
+def _parse_query(query: str) -> dict:
+    """
+    Extract a description, optional size, and optional max_price from the raw
+    user query using the LLM. Returns a dict:
+
+        {"description": str, "size": str | None, "max_price": float | None}
+
+    If the LLM call fails or returns unparseable output, falls back to using the
+    whole query as the description with no size or price filter — the agent can
+    still run a broad search rather than crashing.
+    """
+    fallback = {"description": query.strip(), "size": None, "max_price": None}
+
+    prompt = (
+        "Extract structured search parameters from this secondhand-clothing query. "
+        'Respond with ONLY a JSON object of the form '
+        '{"description": string, "size": string or null, "max_price": number or null}.\n'
+        "- description: the item keywords only (drop size/price/wardrobe chatter).\n"
+        "- size: a size like \"M\", \"US 8\", \"W30\" if stated, else null.\n"
+        "- max_price: the numeric price ceiling if stated (e.g. 'under $30' -> 30), "
+        "else null.\n\n"
+        f"Query: {query}"
+    )
+
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You extract structured data and reply with JSON only.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+        )
+        raw = response.choices[0].message.content.strip()
+
+        # The model may wrap JSON in code fences or prose — extract the object.
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not match:
+            return fallback
+        parsed = json.loads(match.group(0))
+
+        description = parsed.get("description") or query.strip()
+        size = parsed.get("size") or None
+        max_price = parsed.get("max_price")
+        max_price = float(max_price) if max_price is not None else None
+
+        return {"description": description, "size": size, "max_price": max_price}
+    except Exception:
+        return fallback
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -92,9 +152,46 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
+    # Step 1: Initialize the session.
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 2: Parse the query into description / size / max_price.
+    session["parsed"] = _parse_query(query)
+    parsed = session["parsed"]
+
+    # Step 3: Search listings with the parsed parameters.
+    session["search_results"] = search_listings(
+        description=parsed["description"],
+        size=parsed["size"],
+        max_price=parsed["max_price"],
+    )
+
+    # Step 3 (branch): empty results → set error and return early.
+    # Do NOT call suggest_outfit or create_fit_card with no item.
+    if not session["search_results"]:
+        size_txt = parsed["size"] if parsed["size"] else "any size"
+        price_txt = f"${parsed['max_price']:.2f}" if parsed["max_price"] is not None else "any price"
+        session["error"] = (
+            f"No listings found for '{parsed['description']}' in {size_txt} under "
+            f"{price_txt}. Try broadening your search — remove the size filter, "
+            f"increase your budget, or use more general keywords."
+        )
+        return session
+
+    # Step 4: Select the top-scored result.
+    session["selected_item"] = session["search_results"][0]
+
+    # Step 5: Suggest an outfit using the selected item and the wardrobe.
+    session["outfit_suggestion"] = suggest_outfit(
+        session["selected_item"], session["wardrobe"]
+    )
+
+    # Step 6: Generate the shareable fit card from the outfit + selected item.
+    session["fit_card"] = create_fit_card(
+        session["outfit_suggestion"], session["selected_item"]
+    )
+
+    # Step 7: Return the completed session (error stays None on success).
     return session
 
 
